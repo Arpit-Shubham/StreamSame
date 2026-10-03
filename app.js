@@ -1,0 +1,137 @@
+(() => {
+const $ = s => document.querySelector(s);
+const v = $('#video'), PREFIX = 'couchsync-';
+const KEY = (window.CONFIG && window.CONFIG.DRIVE_API_KEY) || '';
+let peer, conn, source = null;
+let wantPlay = false, waitSelf = false, waitPeer = false, dragging = false;
+
+/* ---------- helpers ---------- */
+const say = (t, err) => { const m = $('#msg'); m.textContent = t; m.className = 'msg' + (err ? ' err' : ''); };
+const fmt = s => { s = Math.max(0, s | 0); const h = s / 3600 | 0, m = (s % 3600) / 60 | 0, x = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+const newCode = () => Array.from({ length: 6 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.random() * 32 | 0]).join('');
+const send = m => { if (conn && conn.open) conn.send(m); };
+const driveId = s => (s.match(/\/d\/([\w-]{20,})/) || s.match(/[?&]id=([\w-]{20,})/) || s.match(/^([\w-]{20,})$/) || [])[1];
+
+/* ---------- connection ---------- */
+function show(code) { $('#lobby').hidden = true; $('#room').hidden = false; $('#roomCode').textContent = code; }
+function setPill(ok, t) { const p = $('#pill'); p.textContent = t; p.className = 'pill' + (ok ? ' ok' : ''); }
+
+function host() {
+  const code = newCode();
+  peer = new Peer(PREFIX + code);
+  peer.on('open', () => { show(code); setPill(false, 'Waiting for partner…'); });
+  peer.on('connection', c => { if (conn && conn.open) return c.close(); attach(c); });
+  peer.on('error', e => e.type === 'unavailable-id' ? (peer.destroy(), host()) : say('Connection error: ' + e.type, true));
+}
+function join(code) {
+  code = code.trim().toUpperCase(); if (code.length < 6) return;
+  peer = new Peer();
+  peer.on('open', () => { show(code); setPill(false, 'Connecting…'); attach(peer.connect(PREFIX + code, { reliable: true })); });
+  peer.on('error', e => say(e.type === 'peer-unavailable' ? 'No room with that code.' : 'Connection error: ' + e.type, true));
+}
+function attach(c) {
+  conn = c;
+  c.on('open', () => {
+    setPill(true, 'Connected');
+    if (source) { send({ t: 'src', ...source }); send({ t: 'sync', time: v.currentTime, playing: wantPlay }); }
+  });
+  c.on('data', onMsg);
+  c.on('close', () => { setPill(false, 'Partner left'); waitPeer = false; apply(); });
+}
+
+/* ---------- playback core ---------- */
+function apply() {
+  const go = wantPlay && !waitSelf && !waitPeer;
+  $('#shield').classList.toggle('on', wantPlay && waitPeer);
+  if (go) v.play().catch(() => say('Your browser blocked autoplay. Press Play to join.', true));
+  else { v.pause(); v.playbackRate = 1; }
+  $('#btnPlay').textContent = wantPlay ? 'Pause' : 'Play';
+}
+function setPlay(p) { wantPlay = p; send({ t: p ? 'play' : 'pause', time: v.currentTime }); apply(); }
+function seekTo(t) { v.currentTime = t; send({ t: 'seek', time: t }); }
+function toggle() {
+  if (!v.src) return;
+  if (wantPlay && v.paused && !waitSelf && !waitPeer) return apply(); // blocked autoplay: just resume
+  setPlay(!wantPlay);
+}
+
+function onMsg(m) {
+  switch (m.t) {
+    case 'src': loadSource(m, false); break;
+    case 'play': wantPlay = true; v.currentTime = m.time; apply(); break;
+    case 'pause': wantPlay = false; v.currentTime = m.time; apply(); break;
+    case 'seek': v.currentTime = m.time; break;
+    case 'sync': wantPlay = m.playing; v.currentTime = m.time; apply(); break;
+    case 'wait': waitPeer = true; apply(); break;
+    case 'ready': waitPeer = false; apply(); break;
+    case 'hb': { // gentle drift correction, host is the clock
+      if (waitSelf || waitPeer || v.paused) break;
+      const d = v.currentTime - m.time;
+      if (Math.abs(d) > 0.8) v.currentTime = m.time;
+      else v.playbackRate = Math.abs(d) > 0.12 ? (d > 0 ? 0.97 : 1.03) : 1;
+      break;
+    }
+  }
+}
+setInterval(() => { if (conn && conn.open && peer && peer.id.startsWith(PREFIX) && wantPlay && !v.paused) send({ t: 'hb', time: v.currentTime }); }, 2000);
+
+/* buffering: if either side stalls, both pause, then resume together */
+v.addEventListener('waiting', () => { if (wantPlay && !waitSelf) { waitSelf = true; send({ t: 'wait' }); apply(); } });
+v.addEventListener('canplay', () => { if (waitSelf) { waitSelf = false; send({ t: 'ready' }); apply(); } });
+v.addEventListener('error', () => {
+  const c = v.error && v.error.code;
+  say(c === 4 ? 'Could not play this file. Check sharing is “Anyone with the link”, the API key is set, and the format is MP4 (H.264/AAC).' : 'Playback error (code ' + c + ').', true);
+});
+
+/* ---------- sources ---------- */
+function loadSource(s, announce) {
+  let url;
+  if (s.kind === 'drive') {
+    if (!KEY) return say('Add your Drive API key to config.js first (see README).', true);
+    url = `https://www.googleapis.com/drive/v3/files/${s.value}?alt=media&key=${KEY}`;
+  } else if (s.kind === 'url') url = s.value;
+  else if (s.kind === 'local') {
+    say(`Your partner chose “${s.name}”. Pick the same file under “File on this device”.`);
+    return tab('local');
+  }
+  source = s; wantPlay = false; waitSelf = waitPeer = false;
+  v.src = url; v.load(); $('#empty').hidden = true; apply();
+  say(announce ? 'Loaded. Press Play when you are both ready.' : 'Your partner loaded a video.');
+  if (announce) send({ t: 'src', ...s });
+}
+function tab(k) {
+  document.querySelectorAll('.seg button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
+  $('#srcDrive').hidden = k !== 'drive'; $('#srcUrl').hidden = k !== 'url'; $('#srcLocal').hidden = k !== 'local';
+}
+
+/* ---------- UI wiring ---------- */
+$('#btnHost').onclick = host;
+$('#btnJoin').onclick = () => join($('#joinCode').value);
+$('#joinCode').onkeydown = e => e.key === 'Enter' && join(e.target.value);
+$('#btnCopy').onclick = () => { navigator.clipboard.writeText(location.origin + location.pathname + '#' + $('#roomCode').textContent); say('Invite link copied.'); };
+document.querySelectorAll('.seg button').forEach(b => b.onclick = () => tab(b.dataset.k));
+$('#loadDrive').onclick = () => { const id = driveId($('#driveLink').value.trim()); id ? loadSource({ kind: 'drive', value: id }, true) : say('That does not look like a Drive link.', true); };
+$('#loadUrl').onclick = () => { const u = $('#directLink').value.trim(); /^https?:\/\//.test(u) ? loadSource({ kind: 'url', value: u }, true) : say('Enter a full https:// link.', true); };
+$('#localFile').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  source = { kind: 'local', name: f.name }; v.src = URL.createObjectURL(f); $('#empty').hidden = true;
+  wantPlay = false; apply(); send({ t: 'src', kind: 'local', name: f.name }); say('Loaded locally. Your partner needs the same file.');
+};
+$('#btnPlay').onclick = toggle;
+v.onclick = toggle;
+$('#vol').oninput = e => v.volume = e.target.value;
+$('#btnFs').onclick = () => document.fullscreenElement ? document.exitFullscreen() : $('#stage').requestFullscreen();
+const seek = $('#seek');
+seek.oninput = () => { dragging = true; $('#time').textContent = fmt(seek.value / 1000 * v.duration) + ' / ' + fmt(v.duration); };
+seek.onchange = () => { dragging = false; if (v.duration) seekTo(seek.value / 1000 * v.duration); };
+v.ontimeupdate = () => { if (dragging || !v.duration) return; seek.value = v.currentTime / v.duration * 1000; $('#time').textContent = fmt(v.currentTime) + ' / ' + fmt(v.duration); };
+document.onkeydown = e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); toggle(); }
+  if (e.code === 'ArrowRight') seekTo(v.currentTime + 5);
+  if (e.code === 'ArrowLeft') seekTo(Math.max(0, v.currentTime - 5));
+};
+
+if (location.hash.length === 7) { $('#joinCode').value = location.hash.slice(1); }
+})();
