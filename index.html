@@ -34,7 +34,7 @@
     </div>
 
     <div id="stage" class="stage">
-      <video id="video" playsinline preload="auto"></video>
+      <video id="video" playsinline preload="metadata"></video>
       <div id="empty" class="empty">Choose a video below to begin.</div>
       <div id="shield" class="shield">Waiting for your partner to catch up…</div>
       <div class="controls">
@@ -46,11 +46,10 @@
       </div>
     </div>
 
-    <div class="card source">
+    <div class="card source" id="source">
       <div class="seg" role="tablist">
         <button data-k="drive" class="on">Google Drive</button>
         <button data-k="url">Direct link</button>
-        <button data-k="local">File on this device</button>
       </div>
       <div id="srcDrive" class="srcpane">
         <input id="driveLink" placeholder="Paste the Drive share link (set to “Anyone with the link”)">
@@ -60,12 +59,8 @@
         <input id="directLink" placeholder="https://…/movie.mp4">
         <button id="loadUrl" class="primary">Load video</button>
       </div>
-      <div id="srcLocal" class="srcpane" hidden>
-        <input id="localFile" type="file" accept="video/*">
-        <small>Both of you pick the same file. Nothing is uploaded; only play, pause and seek are shared.</small>
-      </div>
-      <p id="msg" class="msg" role="status"></p>
     </div>
+    <p id="msg" class="msg" role="status"></p>
   </section>
 </main>
 

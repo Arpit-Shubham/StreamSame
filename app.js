@@ -36,7 +36,7 @@ async function iceServers() {
   hasRelay = list.some(s => String(s.urls).startsWith('turn'));
   return list;
 }
-function show(code) { $('#lobby').hidden = true; $('#room').hidden = false; $('#roomCode').textContent = code; }
+function show(code) { $('#source').hidden = !isHost; $('#lobby').hidden = true; $('#room').hidden = false; $('#roomCode').textContent = code; }
 function setPill(ok, t) { const p = $('#pill'); p.textContent = t; p.className = 'pill' + (ok ? ' ok' : ''); }
 const noRelayHint = () => hasRelay ? '' : ' No TURN relay: ' + turnStatus + '.';
 
@@ -147,7 +147,7 @@ async function diagnose() {
     const t = await fetch(`${base}?alt=media&supportsAllDrives=true&key=${KEY}`, { signal: ac.signal });
     if (!t.ok) {
       let m = ''; try { const e = await t.json(); m = e.error.message + ' [' + ((e.error.errors || [{}])[0].reason || '') + ']'; } catch (x) {}
-      return say(`Drive refused to send the video (HTTP ${t.status}). ${m} If this mentions download quota, wait about 24 hours, or make a copy of the file in Drive and load the copy.`, true);
+      return say(`Drive refused to send the video (HTTP ${t.status}). ${m} If this mentions download quota, wait about 24 hours, or give each person a separate copy of the file (tick “own copy”) or use “File on this device”.`, true);
     }
     ac.abort();
     if (/matroska/.test(j.mimeType))
@@ -163,10 +163,7 @@ function loadSource(s, announce) {
     if (!KEY) return say('Add your Drive API key to config.js first (see README).', true);
     url = `https://www.googleapis.com/drive/v3/files/${s.value}?alt=media&key=${KEY}`;
   } else if (s.kind === 'url') url = s.value;
-  else if (s.kind === 'local') {
-    say(`Your partner chose “${s.name}”. Pick the same file under “File on this device”.`);
-    return tab('local');
-  }
+  else return;
   source = s; wantPlay = false; waitSelf = waitPeer = false; blocked = false;
   v.src = url; v.load(); $('#empty').hidden = true; apply();
   say(announce ? 'Loaded. Press Play when you are both ready.' : 'Your partner loaded a video.');
@@ -174,7 +171,7 @@ function loadSource(s, announce) {
 }
 function tab(k) {
   document.querySelectorAll('.seg button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
-  $('#srcDrive').hidden = k !== 'drive'; $('#srcUrl').hidden = k !== 'url'; $('#srcLocal').hidden = k !== 'local';
+  $('#srcDrive').hidden = k !== 'drive'; $('#srcUrl').hidden = k !== 'url';
 }
 
 /* ---------- UI wiring ---------- */
@@ -185,11 +182,6 @@ $('#btnCopy').onclick = () => { navigator.clipboard.writeText(location.origin + 
 document.querySelectorAll('.seg button').forEach(b => b.onclick = () => tab(b.dataset.k));
 $('#loadDrive').onclick = () => { const id = driveId($('#driveLink').value.trim()); id ? loadSource({ kind: 'drive', value: id }, true) : say('That does not look like a Drive link.', true); };
 $('#loadUrl').onclick = () => { const u = $('#directLink').value.trim(); /^https?:\/\//.test(u) ? loadSource({ kind: 'url', value: u }, true) : say('Enter a full https:// link.', true); };
-$('#localFile').onchange = e => {
-  const f = e.target.files[0]; if (!f) return;
-  source = { kind: 'local', name: f.name }; v.src = URL.createObjectURL(f); $('#empty').hidden = true;
-  wantPlay = false; blocked = false; apply(); send({ t: 'src', kind: 'local', name: f.name }); say('Loaded locally. Your partner needs the same file.');
-};
 $('#btnPlay').onclick = toggle;
 v.onclick = toggle;
 $('#vol').oninput = e => v.volume = e.target.value;
