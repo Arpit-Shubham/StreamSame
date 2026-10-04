@@ -1,13 +1,13 @@
 (() => {
 const $ = s => document.querySelector(s);
-const v = $('#video'), PREFIX = 'couchsync-';
+const v = $('#video'), PREFIX = 'streamsame-';
 const C = window.CONFIG || {};
 const KEY = C.DRIVE_API_KEY || '';
 let peer, conn, source = null, isHost = false, hasRelay = false, turnStatus = '', waitTimer = null, blocked = false;
 let wantPlay = false, waitSelf = false, waitPeer = false, dragging = false;
 
 /* ---------- helpers ---------- */
-const say = (t, err) => { const m = $('#msg'); m.textContent = t; m.className = 'msg' + (err ? ' err' : ''); };
+const say = (t, err) => { const m = $('#msg'); m.textContent = t; m.hidden = !t; m.className = 'msg glass' + (err ? ' err' : ''); };
 const fmt = s => { s = Math.max(0, s | 0); const h = s / 3600 | 0, m = (s % 3600) / 60 | 0, x = s % 60;
   return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
 const newCode = () => Array.from({ length: 6 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.random() * 32 | 0]).join('');
