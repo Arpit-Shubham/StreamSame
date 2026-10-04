@@ -1,8 +1,9 @@
 (() => {
 const $ = s => document.querySelector(s);
 const v = $('#video'), PREFIX = 'couchsync-';
-const KEY = (window.CONFIG && window.CONFIG.DRIVE_API_KEY) || '';
-let peer, conn, source = null;
+const C = window.CONFIG || {};
+const KEY = C.DRIVE_API_KEY || '';
+let peer, conn, source = null, isHost = false, hasRelay = false, waitTimer = null, blocked = false;
 let wantPlay = false, waitSelf = false, waitPeer = false, dragging = false;
 
 /* ---------- helpers ---------- */
@@ -12,60 +13,92 @@ const fmt = s => { s = Math.max(0, s | 0); const h = s / 3600 | 0, m = (s % 3600
 const newCode = () => Array.from({ length: 6 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.random() * 32 | 0]).join('');
 const send = m => { if (conn && conn.open) conn.send(m); };
 const driveId = s => (s.match(/\/d\/([\w-]{20,})/) || s.match(/[?&]id=([\w-]{20,})/) || s.match(/^([\w-]{20,})$/) || [])[1];
+const hasSrc = () => !!(v.currentSrc || v.getAttribute('src'));
+const setTime = t => { if (Math.abs(v.currentTime - t) > 0.4) v.currentTime = t; };
+const ahead = () => { const b = v.buffered;
+  for (let i = 0; i < b.length; i++) if (v.currentTime >= b.start(i) - 0.1 && v.currentTime <= b.end(i)) return b.end(i) - v.currentTime;
+  return 0; };
 
-/* ---------- connection ---------- */
+/* ---------- network (STUN + TURN relay so it works across different networks) ---------- */
+async function iceServers() {
+  const list = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' }];
+  if (Array.isArray(C.ICE_SERVERS)) list.push(...C.ICE_SERVERS);
+  if (C.METERED_APP && C.METERED_KEY) {
+    try {
+      const r = await fetch(`https://${C.METERED_APP}.metered.live/api/v1/turn/credentials?apiKey=${C.METERED_KEY}`);
+      if (r.ok) list.push(...await r.json());
+    } catch (e) { /* fall back to STUN only */ }
+  }
+  hasRelay = list.some(s => String(s.urls).startsWith('turn'));
+  return list;
+}
 function show(code) { $('#lobby').hidden = true; $('#room').hidden = false; $('#roomCode').textContent = code; }
 function setPill(ok, t) { const p = $('#pill'); p.textContent = t; p.className = 'pill' + (ok ? ' ok' : ''); }
+const noRelayHint = () => hasRelay ? '' : ' No TURN relay is configured, so different networks may fail (see README step 4).';
 
-function host() {
-  const code = newCode();
-  peer = new Peer(PREFIX + code);
-  peer.on('open', () => { show(code); setPill(false, 'Waiting for partner…'); });
+async function host() {
+  isHost = true;
+  const code = newCode(), ice = await iceServers();
+  peer = new Peer(PREFIX + code, { config: { iceServers: ice } });
+  peer.on('open', () => { show(code); setPill(false, 'Waiting for partner…'); if (!hasRelay) say(noRelayHint().trim(), true); });
   peer.on('connection', c => { if (conn && conn.open) return c.close(); attach(c); });
   peer.on('error', e => e.type === 'unavailable-id' ? (peer.destroy(), host()) : say('Connection error: ' + e.type, true));
 }
-function join(code) {
+async function join(code) {
   code = code.trim().toUpperCase(); if (code.length < 6) return;
-  peer = new Peer();
-  peer.on('open', () => { show(code); setPill(false, 'Connecting…'); attach(peer.connect(PREFIX + code, { reliable: true })); });
+  const ice = await iceServers();
+  peer = new Peer(undefined, { config: { iceServers: ice } });
+  peer.on('open', () => {
+    show(code); setPill(false, 'Connecting…');
+    attach(peer.connect(PREFIX + code, { reliable: true }));
+    setTimeout(() => { if (!(conn && conn.open)) { setPill(false, 'Not connected'); say('Still not connected.' + noRelayHint() + ' Check the code and that your partner has the room open.', true); } }, 20000);
+  });
   peer.on('error', e => say(e.type === 'peer-unavailable' ? 'No room with that code.' : 'Connection error: ' + e.type, true));
 }
 function attach(c) {
   conn = c;
   c.on('open', () => {
-    setPill(true, 'Connected');
+    setPill(true, 'Connected'); say('Connected.');
     if (source) { send({ t: 'src', ...source }); send({ t: 'sync', time: v.currentTime, playing: wantPlay }); }
   });
   c.on('data', onMsg);
-  c.on('close', () => { setPill(false, 'Partner left'); waitPeer = false; apply(); });
+  c.on('close', () => { setPill(false, 'Partner left'); waitPeer = false; conn = null; apply(); });
+  c.on('error', e => say('Connection error: ' + (e.type || e), true));
 }
 
 /* ---------- playback core ---------- */
 function apply() {
   const go = wantPlay && !waitSelf && !waitPeer;
   $('#shield').classList.toggle('on', wantPlay && waitPeer);
-  if (go) v.play().catch(() => say('Your browser blocked autoplay. Press Play to join.', true));
-  else { v.pause(); v.playbackRate = 1; }
+  if (go) {
+    if (hasSrc()) {
+      const p = v.play();
+      if (p) p.then(() => { blocked = false; }).catch(e => {
+        if (e.name === 'NotAllowedError') { blocked = true; say('Your browser blocked autoplay. Press Play once to start.', true); }
+        // AbortError just means a pause/seek interrupted play(); safe to ignore
+      });
+    }
+  } else { v.pause(); v.playbackRate = 1; }
   $('#btnPlay').textContent = wantPlay ? 'Pause' : 'Play';
 }
 function setPlay(p) { wantPlay = p; send({ t: p ? 'play' : 'pause', time: v.currentTime }); apply(); }
 function seekTo(t) { v.currentTime = t; send({ t: 'seek', time: t }); }
 function toggle() {
-  if (!v.src) return;
-  if (wantPlay && v.paused && !waitSelf && !waitPeer) return apply(); // blocked autoplay: just resume
+  if (!hasSrc()) return;
+  if (blocked) { blocked = false; return apply(); }
   setPlay(!wantPlay);
 }
 
 function onMsg(m) {
   switch (m.t) {
     case 'src': loadSource(m, false); break;
-    case 'play': wantPlay = true; v.currentTime = m.time; apply(); break;
-    case 'pause': wantPlay = false; v.currentTime = m.time; apply(); break;
-    case 'seek': v.currentTime = m.time; break;
-    case 'sync': wantPlay = m.playing; v.currentTime = m.time; apply(); break;
+    case 'play': wantPlay = true; setTime(m.time); apply(); break;
+    case 'pause': wantPlay = false; setTime(m.time); apply(); break;
+    case 'seek': setTime(m.time); break;
+    case 'sync': wantPlay = m.playing; setTime(m.time); apply(); break;
     case 'wait': waitPeer = true; apply(); break;
     case 'ready': waitPeer = false; apply(); break;
-    case 'hb': { // gentle drift correction, host is the clock
+    case 'hb': {
       if (waitSelf || waitPeer || v.paused) break;
       const d = v.currentTime - m.time;
       if (Math.abs(d) > 0.8) v.currentTime = m.time;
@@ -74,14 +107,26 @@ function onMsg(m) {
     }
   }
 }
-setInterval(() => { if (conn && conn.open && peer && peer.id.startsWith(PREFIX) && wantPlay && !v.paused) send({ t: 'hb', time: v.currentTime }); }, 2000);
+setInterval(() => { if (isHost && conn && conn.open && wantPlay && !v.paused) send({ t: 'hb', time: v.currentTime }); }, 2000);
 
-/* buffering: if either side stalls, both pause, then resume together */
-v.addEventListener('waiting', () => { if (wantPlay && !waitSelf) { waitSelf = true; send({ t: 'wait' }); apply(); } });
-v.addEventListener('canplay', () => { if (waitSelf) { waitSelf = false; send({ t: 'ready' }); apply(); } });
+/* buffering: if either side stalls, both pause; resume together once ~3s is buffered */
+v.addEventListener('waiting', () => {
+  clearTimeout(waitTimer);
+  waitTimer = setTimeout(() => {
+    if (wantPlay && !waitSelf && ahead() < 1) { waitSelf = true; send({ t: 'wait' }); apply(); }
+  }, 600);
+});
+const tryResume = () => {
+  if (!waitSelf) return;
+  if (ahead() >= 3 || (v.duration && v.duration - v.currentTime < 3 && v.readyState >= 3)) {
+    clearTimeout(waitTimer); waitSelf = false; send({ t: 'ready' }); apply();
+  }
+};
+['progress', 'canplay', 'canplaythrough', 'seeked'].forEach(e => v.addEventListener(e, tryResume));
+v.addEventListener('ended', () => { wantPlay = false; apply(); });
 v.addEventListener('error', () => {
   const c = v.error && v.error.code;
-  say(c === 4 ? 'Could not play this file. Check sharing is “Anyone with the link”, the API key is set, and the format is MP4 (H.264/AAC).' : 'Playback error (code ' + c + ').', true);
+  say(c === 4 ? 'Could not play this file. Check sharing is “Anyone with the link”, the API key is set and allows this site, and the format is MP4 (H.264/AAC).' : 'Playback error (code ' + c + ').', true);
 });
 
 /* ---------- sources ---------- */
@@ -95,7 +140,7 @@ function loadSource(s, announce) {
     say(`Your partner chose “${s.name}”. Pick the same file under “File on this device”.`);
     return tab('local');
   }
-  source = s; wantPlay = false; waitSelf = waitPeer = false;
+  source = s; wantPlay = false; waitSelf = waitPeer = false; blocked = false;
   v.src = url; v.load(); $('#empty').hidden = true; apply();
   say(announce ? 'Loaded. Press Play when you are both ready.' : 'Your partner loaded a video.');
   if (announce) send({ t: 'src', ...s });
@@ -116,7 +161,7 @@ $('#loadUrl').onclick = () => { const u = $('#directLink').value.trim(); /^https
 $('#localFile').onchange = e => {
   const f = e.target.files[0]; if (!f) return;
   source = { kind: 'local', name: f.name }; v.src = URL.createObjectURL(f); $('#empty').hidden = true;
-  wantPlay = false; apply(); send({ t: 'src', kind: 'local', name: f.name }); say('Loaded locally. Your partner needs the same file.');
+  wantPlay = false; blocked = false; apply(); send({ t: 'src', kind: 'local', name: f.name }); say('Loaded locally. Your partner needs the same file.');
 };
 $('#btnPlay').onclick = toggle;
 v.onclick = toggle;
