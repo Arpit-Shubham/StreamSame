@@ -3,7 +3,7 @@ const $ = s => document.querySelector(s);
 const v = $('#video'), PREFIX = 'couchsync-';
 const C = window.CONFIG || {};
 const KEY = C.DRIVE_API_KEY || '';
-let peer, conn, source = null, isHost = false, hasRelay = false, waitTimer = null, blocked = false;
+let peer, conn, source = null, isHost = false, hasRelay = false, turnStatus = '', waitTimer = null, blocked = false;
 let wantPlay = false, waitSelf = false, waitPeer = false, dragging = false;
 
 /* ---------- helpers ---------- */
@@ -23,18 +23,21 @@ const ahead = () => { const b = v.buffered;
 async function iceServers() {
   const list = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' }];
   if (Array.isArray(C.ICE_SERVERS)) list.push(...C.ICE_SERVERS);
+  turnStatus = '';
   if (C.METERED_APP && C.METERED_KEY) {
     try {
       const r = await fetch(`https://${C.METERED_APP}.metered.live/api/v1/turn/credentials?apiKey=${C.METERED_KEY}`);
-      if (r.ok) list.push(...await r.json());
-    } catch (e) { /* fall back to STUN only */ }
-  }
+      const j = r.ok ? await r.json() : null;
+      if (Array.isArray(j)) list.push(...j);
+      else turnStatus = 'Metered answered HTTP ' + r.status + (r.status === 401 || r.status === 400 ? ' (API key looks wrong)' : r.status === 404 ? ' (app name looks wrong)' : '');
+    } catch (e) { turnStatus = 'could not reach Metered (app name wrong, or blocked by a network/ad-blocker)'; }
+  } else turnStatus = 'METERED_APP / METERED_KEY are empty in the config.js that is deployed (redeploy and hard refresh)';
   hasRelay = list.some(s => String(s.urls).startsWith('turn'));
   return list;
 }
 function show(code) { $('#lobby').hidden = true; $('#room').hidden = false; $('#roomCode').textContent = code; }
 function setPill(ok, t) { const p = $('#pill'); p.textContent = t; p.className = 'pill' + (ok ? ' ok' : ''); }
-const noRelayHint = () => hasRelay ? '' : ' No TURN relay is configured, so different networks may fail (see README step 4).';
+const noRelayHint = () => hasRelay ? '' : ' No TURN relay: ' + turnStatus + '.';
 
 async function host() {
   isHost = true;
@@ -126,8 +129,23 @@ const tryResume = () => {
 v.addEventListener('ended', () => { wantPlay = false; apply(); });
 v.addEventListener('error', () => {
   const c = v.error && v.error.code;
-  say(c === 4 ? 'Could not play this file. Check sharing is “Anyone with the link”, the API key is set and allows this site, and the format is MP4 (H.264/AAC).' : 'Playback error (code ' + c + ').', true);
+  if (c === 4 && source && source.kind === 'drive') { say('Could not play this file. Checking why…', true); return diagnose(); }
+  say(c === 4 ? 'Could not play this file. Check the link is public and the format is MP4 (H.264/AAC).' : 'Playback error (code ' + c + ').', true);
 });
+async function diagnose() {
+  try {
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${source.value}?fields=name,mimeType,size&supportsAllDrives=true&key=${KEY}`);
+    const j = await r.json();
+    if (j.error) {
+      const why = (j.error.errors && j.error.errors[0] && j.error.errors[0].reason) || '';
+      return say('Google says: ' + j.error.message + (why ? ' [' + why + ']' : ''), true);
+    }
+    const mb = Math.round(j.size / 1048576);
+    if (!/^video\/(mp4|webm|quicktime)/.test(j.mimeType))
+      return say(`“${j.name}” is ${j.mimeType}. Browsers usually can't play that. Convert it to MP4 (H.264 + AAC).`, true);
+    say(`Drive access is fine (${j.name}, ${mb} MB, ${j.mimeType}) but the browser failed to play it. Likely causes: the video uses HEVC/H.265 or odd audio (re-encode to H.264 + AAC), or Drive temporarily blocked the download (quota).`, true);
+  } catch (e) { say('Could not reach the Drive API: ' + e.message, true); }
+}
 
 /* ---------- sources ---------- */
 function loadSource(s, announce) {
