@@ -24,9 +24,10 @@ async function iceServers() {
   const list = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' }];
   if (Array.isArray(C.ICE_SERVERS)) list.push(...C.ICE_SERVERS);
   turnStatus = '';
-  if (C.METERED_APP && C.METERED_KEY) {
+  const app = String(C.METERED_APP || '').trim().replace(/^https?:\/\//, '').replace(/\.metered\.live.*$/, '').replace(/\/.*$/, '');
+  if (app && C.METERED_KEY) {
     try {
-      const r = await fetch(`https://${C.METERED_APP}.metered.live/api/v1/turn/credentials?apiKey=${C.METERED_KEY}`);
+      const r = await fetch(`https://${app}.metered.live/api/v1/turn/credentials?apiKey=${String(C.METERED_KEY).trim()}`);
       const j = r.ok ? await r.json() : null;
       if (Array.isArray(j)) list.push(...j);
       else turnStatus = 'Metered answered HTTP ' + r.status + (r.status === 401 || r.status === 400 ? ' (API key looks wrong)' : r.status === 404 ? ' (app name looks wrong)' : '');
@@ -134,17 +135,25 @@ v.addEventListener('error', () => {
 });
 async function diagnose() {
   try {
-    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${source.value}?fields=name,mimeType,size&supportsAllDrives=true&key=${KEY}`);
-    const j = await r.json();
+    const base = `https://www.googleapis.com/drive/v3/files/${source.value}`;
+    const j = await (await fetch(`${base}?fields=name,mimeType,size&supportsAllDrives=true&key=${KEY}`)).json();
     if (j.error) {
       const why = (j.error.errors && j.error.errors[0] && j.error.errors[0].reason) || '';
       return say('Google says: ' + j.error.message + (why ? ' [' + why + ']' : ''), true);
     }
     const mb = Math.round(j.size / 1048576);
-    if (!/^video\/(mp4|webm|quicktime)/.test(j.mimeType))
-      return say(`“${j.name}” is ${j.mimeType}. Browsers usually can't play that. Convert it to MP4 (H.264 + AAC).`, true);
-    say(`Drive access is fine (${j.name}, ${mb} MB, ${j.mimeType}) but the browser failed to play it. Likely causes: the video uses HEVC/H.265 or odd audio (re-encode to H.264 + AAC), or Drive temporarily blocked the download (quota).`, true);
-  } catch (e) { say('Could not reach the Drive API: ' + e.message, true); }
+    // does Drive actually hand over the video bytes? (headers only, then abort)
+    const ac = new AbortController();
+    const t = await fetch(`${base}?alt=media&supportsAllDrives=true&key=${KEY}`, { signal: ac.signal });
+    if (!t.ok) {
+      let m = ''; try { const e = await t.json(); m = e.error.message + ' [' + ((e.error.errors || [{}])[0].reason || '') + ']'; } catch (x) {}
+      return say(`Drive refused to send the video (HTTP ${t.status}). ${m} If this mentions download quota, wait about 24 hours, or make a copy of the file in Drive and load the copy.`, true);
+    }
+    ac.abort();
+    if (/matroska/.test(j.mimeType))
+      return say(`Drive is serving “${j.name}” fine (${mb} MB), so the problem is playback. It is an MKV: use Chrome or Edge on a computer (Firefox and Safari can't play MKV). If it still fails or has no sound, the audio is probably Dolby (AC3/E-AC3) or the video is HEVC. Convert to MP4 (H.264 + AAC).`, true);
+    say(`Drive is serving “${j.name}” fine (${mb} MB, ${j.mimeType}), but the browser can't decode it. Likely HEVC/H.265 or unusual audio: re-encode to MP4 (H.264 + AAC).`, true);
+  } catch (e) { if (e.name !== 'AbortError') say('Could not reach the Drive API: ' + e.message, true); }
 }
 
 /* ---------- sources ---------- */
