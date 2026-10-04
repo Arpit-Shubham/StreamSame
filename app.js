@@ -3,8 +3,10 @@ const $ = s => document.querySelector(s);
 const v = $('#video'), PREFIX = 'streamsame-';
 const C = window.CONFIG || {};
 const KEY = C.DRIVE_API_KEY || '';
-let peer, conn, source = null, isHost = false, hasRelay = false, turnStatus = '', waitTimer = null, blocked = false;
+const EMOJI = ['👍', '❤️', '😂', '😢'];
+let peer, conn, source = null, isHost = false, hasRelay = false, turnStatus = '', blocked = false;
 let wantPlay = false, waitSelf = false, waitPeer = false, dragging = false;
+let waitSince = 0, forceUntil = 0, lastSt = 0, lastLocal = 0, lowTicks = 0;
 
 /* ---------- helpers ---------- */
 const say = (t, err) => { const m = $('#msg'); m.textContent = t; m.hidden = !t; m.className = 'msg glass' + (err ? ' err' : ''); };
@@ -62,7 +64,7 @@ async function join(code) {
 function attach(c) {
   conn = c;
   c.on('open', () => {
-    setPill(true, 'Connected'); say('Connected.');
+    setPill(true, 'Connected'); say(''); lastSt = Date.now();
     if (source) { send({ t: 'src', ...source }); send({ t: 'sync', time: v.currentTime, playing: wantPlay }); }
   });
   c.on('data', onMsg);
@@ -72,21 +74,22 @@ function attach(c) {
 
 /* ---------- playback core ---------- */
 function apply() {
+  if (wantPlay) v.preload = 'auto';
   const go = wantPlay && !waitSelf && !waitPeer;
-  $('#shield').classList.toggle('on', wantPlay && waitPeer);
+  const sh = $('#shield');
+  sh.classList.toggle('on', wantPlay && (waitSelf || waitPeer));
+  sh.textContent = waitPeer ? 'Waiting for your partner to catch up…' : 'Buffering…';
   if (go) {
-    if (hasSrc()) {
-      const p = v.play();
-      if (p) p.then(() => { blocked = false; }).catch(e => {
+    if (hasSrc() && v.paused && !blocked) {
+      v.play().then(() => { blocked = false; }).catch(e => {
         if (e.name === 'NotAllowedError') { blocked = true; say('Your browser blocked autoplay. Press Play once to start.', true); }
-        // AbortError just means a pause/seek interrupted play(); safe to ignore
       });
     }
-  } else { v.pause(); v.playbackRate = 1; }
+  } else { if (!v.paused) v.pause(); v.playbackRate = 1; }
   $('#btnPlay').textContent = wantPlay ? 'Pause' : 'Play';
 }
-function setPlay(p) { wantPlay = p; send({ t: p ? 'play' : 'pause', time: v.currentTime }); apply(); }
-function seekTo(t) { v.currentTime = t; send({ t: 'seek', time: t }); }
+function setPlay(p) { lastLocal = Date.now(); wantPlay = p; send({ t: p ? 'play' : 'pause', time: v.currentTime }); apply(); }
+function seekTo(t) { lastLocal = Date.now(); v.currentTime = t; send({ t: 'seek', time: t }); }
 function toggle() {
   if (!hasSrc()) return;
   if (blocked) { blocked = false; return apply(); }
@@ -100,33 +103,42 @@ function onMsg(m) {
     case 'pause': wantPlay = false; setTime(m.time); apply(); break;
     case 'seek': setTime(m.time); break;
     case 'sync': wantPlay = m.playing; setTime(m.time); apply(); break;
-    case 'wait': waitPeer = true; apply(); break;
-    case 'ready': waitPeer = false; apply(); break;
-    case 'hb': {
-      if (waitSelf || waitPeer || v.paused) break;
-      const d = v.currentTime - m.time;
-      if (Math.abs(d) > 0.8) v.currentTime = m.time;
-      else v.playbackRate = Math.abs(d) > 0.12 ? (d > 0 ? 0.97 : 1.03) : 1;
+    case 'react': if (EMOJI.includes(m.e)) floatEmoji(m.e); break;
+    case 'st': { // partner status, sent twice a second: self-healing, nothing can get "stuck"
+      lastSt = Date.now();
+      if (waitPeer !== m.w) { waitPeer = m.w; apply(); }
+      if (m.host && !isHost && Date.now() - lastLocal > 2500) { // guest follows host if they ever disagree
+        if (m.p !== wantPlay) { wantPlay = m.p; apply(); }
+        if (!waitSelf && !waitPeer && hasSrc() && m.p === wantPlay) {
+          const d = v.currentTime - m.time;
+          if (Math.abs(d) > (wantPlay ? 0.8 : 2.5)) v.currentTime = m.time;
+          else v.playbackRate = wantPlay && Math.abs(d) > 0.12 ? (d > 0 ? 0.97 : 1.03) : 1;
+        }
+      }
       break;
     }
   }
 }
-setInterval(() => { if (isHost && conn && conn.open && wantPlay && !v.paused) send({ t: 'hb', time: v.currentTime }); }, 2000);
 
-/* buffering: if either side stalls, both pause; resume together once ~3s is buffered */
-v.addEventListener('waiting', () => {
-  clearTimeout(waitTimer);
-  waitTimer = setTimeout(() => {
-    if (wantPlay && !waitSelf && ahead() < 1) { waitSelf = true; send({ t: 'wait' }); apply(); }
-  }, 600);
-});
-const tryResume = () => {
-  if (!waitSelf) return;
-  if (ahead() >= 3 || (v.duration && v.duration - v.currentTime < 3 && v.readyState >= 3)) {
-    clearTimeout(waitTimer); waitSelf = false; send({ t: 'ready' }); apply();
+/* every 500 ms: decide if we are starving for data, tell the partner how we are doing */
+setInterval(() => {
+  const now = Date.now();
+  if (hasSrc() && wantPlay) {
+    const a = ahead(), nearEnd = v.duration && v.duration - v.currentTime < 2;
+    if (!waitSelf) {
+      lowTicks = (v.readyState < 3 || a < 0.3) && !nearEnd && now > forceUntil ? lowTicks + 1 : 0;
+      if (lowTicks >= 2) { waitSelf = true; waitSince = now; lowTicks = 0; apply(); }
+    } else {
+      const ok = a >= 2 || nearEnd || (v.readyState >= 3 && now - waitSince > 5000);
+      if (ok || now - waitSince > 20000) { waitSelf = false; forceUntil = ok ? 0 : now + 8000; apply(); }
+    }
+  } else if (waitSelf) { waitSelf = false; apply(); }
+  if (conn && conn.open) {
+    send({ t: 'st', w: waitSelf, p: wantPlay, time: v.currentTime, host: isHost });
+    if (waitPeer && now - lastSt > 4000) { waitPeer = false; apply(); }
   }
-};
-['progress', 'canplay', 'canplaythrough', 'seeked'].forEach(e => v.addEventListener(e, tryResume));
+}, 500);
+
 v.addEventListener('ended', () => { wantPlay = false; apply(); });
 v.addEventListener('error', () => {
   const c = v.error && v.error.code;
@@ -142,19 +154,32 @@ async function diagnose() {
       return say('Google says: ' + j.error.message + (why ? ' [' + why + ']' : ''), true);
     }
     const mb = Math.round(j.size / 1048576);
-    // does Drive actually hand over the video bytes? (headers only, then abort)
     const ac = new AbortController();
     const t = await fetch(`${base}?alt=media&supportsAllDrives=true&key=${KEY}`, { signal: ac.signal });
     if (!t.ok) {
       let m = ''; try { const e = await t.json(); m = e.error.message + ' [' + ((e.error.errors || [{}])[0].reason || '') + ']'; } catch (x) {}
-      return say(`Drive refused to send the video (HTTP ${t.status}). ${m} If this mentions download quota, wait about 24 hours, or give each person a separate copy of the file (tick “own copy”) or use “File on this device”.`, true);
+      return say(`Drive refused to send the video (HTTP ${t.status}). ${m} If this mentions download quota, wait about 24 hours or load a fresh copy of the file.`, true);
     }
     ac.abort();
     if (/matroska/.test(j.mimeType))
-      return say(`Drive is serving “${j.name}” fine (${mb} MB), so the problem is playback. It is an MKV: use Chrome or Edge on a computer (Firefox and Safari can't play MKV). If it still fails or has no sound, the audio is probably Dolby (AC3/E-AC3) or the video is HEVC. Convert to MP4 (H.264 + AAC).`, true);
+      return say(`Drive is serving “${j.name}” fine (${mb} MB), so the problem is playback. It is an MKV: use Chrome or Edge on a computer. If it still fails or has no sound, the audio is probably Dolby (AC3/E-AC3) or the video is HEVC. Convert to MP4 (H.264 + AAC).`, true);
     say(`Drive is serving “${j.name}” fine (${mb} MB, ${j.mimeType}), but the browser can't decode it. Likely HEVC/H.265 or unusual audio: re-encode to MP4 (H.264 + AAC).`, true);
   } catch (e) { if (e.name !== 'AbortError') say('Could not reach the Drive API: ' + e.message, true); }
 }
+
+/* ---------- reactions ---------- */
+function floatEmoji(e) {
+  const f = $('#floaters'); if (f.children.length > 30) f.firstChild.remove();
+  const el = document.createElement('span');
+  el.className = 'fl'; el.textContent = e;
+  el.style.left = (8 + Math.random() * 78) + '%';
+  el.style.setProperty('--dx', (Math.random() * 80 - 40) + 'px');
+  f.appendChild(el); setTimeout(() => el.remove(), 3200);
+}
+function react(e) { floatEmoji(e); send({ t: 'react', e }); }
+$('#btnReact').onclick = ev => { ev.stopPropagation(); $('#tray').hidden = !$('#tray').hidden; };
+document.querySelectorAll('#tray button').forEach(b => b.onclick = ev => { ev.stopPropagation(); react(b.dataset.e); });
+document.addEventListener('click', ev => { if (!ev.target.closest('#tray')) $('#tray').hidden = true; });
 
 /* ---------- sources ---------- */
 function loadSource(s, announce) {
@@ -164,8 +189,8 @@ function loadSource(s, announce) {
     url = `https://www.googleapis.com/drive/v3/files/${s.value}?alt=media&key=${KEY}`;
   } else if (s.kind === 'url') url = s.value;
   else return;
-  source = s; wantPlay = false; waitSelf = waitPeer = false; blocked = false;
-  v.src = url; v.load(); $('#empty').hidden = true; apply();
+  source = s; wantPlay = false; waitSelf = waitPeer = false; blocked = false; lowTicks = 0;
+  v.preload = 'metadata'; v.src = url; v.load(); $('#empty').hidden = true; apply();
   say(announce ? 'Loaded. Press Play when you are both ready.' : 'Your partner loaded a video.');
   if (announce) send({ t: 'src', ...s });
 }

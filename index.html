@@ -46,11 +46,19 @@
         <video id="video" playsinline preload="metadata"></video>
         <div id="empty" class="empty">Your video will appear here.</div>
         <div id="shield" class="shield">Waiting for your partner to catch up…</div>
+        <div id="floaters" class="floaters" aria-hidden="true"></div>
+        <div id="tray" class="tray" hidden>
+          <button data-e="👍" aria-label="Thumbs up">👍</button>
+          <button data-e="❤️" aria-label="Heart">❤️</button>
+          <button data-e="😂" aria-label="Laugh">😂</button>
+          <button data-e="😢" aria-label="Cry">😢</button>
+        </div>
         <div class="controls">
           <button id="btnPlay" aria-label="Play or pause">Play</button>
           <span id="time" class="time">0:00 / 0:00</span>
           <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
           <input id="vol" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+          <button id="btnReact" aria-label="Send a reaction">😊</button>
           <button id="btnFs" aria-label="Fullscreen">Full screen</button>
         </div>
       </div>
