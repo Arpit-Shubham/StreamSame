@@ -6,7 +6,24 @@ const KEY = C.DRIVE_API_KEY || '';
 const EMOJI = ['👍', '❤️', '😂', '😢'];
 let peer, conn, source = null, isHost = false, hasRelay = false, turnStatus = '', blocked = false;
 let wantPlay = false, waitSelf = false, waitPeer = false, dragging = false;
-let waitSince = 0, forceUntil = 0, lastSt = 0, lastLocal = 0, lowTicks = 0;
+let waitSince = 0, forceUntil = 0, lastSt = 0, lastLocal = 0, lastCmd = 0, lowTicks = 0;
+
+/* ---------- YouTube adapter: behaves like a tiny <video> so the sync core is shared ---------- */
+const yt = {
+  p: null, ready: false, has: false,
+  get currentTime() { return this.ready ? this.p.getCurrentTime() || 0 : 0; },
+  set currentTime(t) { if (this.ready) this.p.seekTo(t, true); },
+  get duration() { return this.ready ? this.p.getDuration() || 0 : 0; },
+  get state() { return this.ready ? this.p.getPlayerState() : -1; },
+  get paused() { const s = this.state; return s !== 1 && s !== 3; },
+  get readyState() { return !this.ready || this.state === 3 ? 1 : 4; },
+  set playbackRate(r) {}, get playbackRate() { return 1; },
+  set volume(x) { if (this.ready) this.p.setVolume(x * 100); },
+  ahead() { return this.ready ? Math.max(0, this.p.getVideoLoadedFraction() * this.duration - this.currentTime) : 0; },
+  play() { if (this.ready) this.p.playVideo(); return Promise.resolve(); },
+  pause() { if (this.ready) this.p.pauseVideo(); }
+};
+let P = v; // the active player: <video> or yt
 
 /* ---------- helpers ---------- */
 const say = (t, err) => { const m = $('#msg'); m.textContent = t; m.hidden = !t; m.className = 'msg glass' + (err ? ' err' : ''); };
@@ -15,11 +32,15 @@ const fmt = s => { s = Math.max(0, s | 0); const h = s / 3600 | 0, m = (s % 3600
 const newCode = () => Array.from({ length: 6 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.random() * 32 | 0]).join('');
 const send = m => { if (conn && conn.open) conn.send(m); };
 const driveId = s => (s.match(/\/d\/([\w-]{20,})/) || s.match(/[?&]id=([\w-]{20,})/) || s.match(/^([\w-]{20,})$/) || [])[1];
-const hasSrc = () => !!(v.currentSrc || v.getAttribute('src'));
-const setTime = t => { if (Math.abs(v.currentTime - t) > 0.4) v.currentTime = t; };
-const ahead = () => { const b = v.buffered;
+const ytId = s => (s.match(/(?:youtu\.be\/|[?&]v=|\/embed\/|\/shorts\/|\/live\/)([\w-]{11})/) || s.match(/^([\w-]{11})$/) || [])[1];
+const hasSrc = () => P === yt ? yt.has : !!(v.currentSrc || v.getAttribute('src'));
+const setTime = t => { if (Math.abs(P.currentTime - t) > (P === yt ? 1 : 0.4)) P.currentTime = t; };
+const ahead = () => {
+  if (P === yt) return yt.ahead();
+  const b = v.buffered;
   for (let i = 0; i < b.length; i++) if (v.currentTime >= b.start(i) - 0.1 && v.currentTime <= b.end(i)) return b.end(i) - v.currentTime;
-  return 0; };
+  return 0;
+};
 
 /* ---------- network (STUN + TURN relay so it works across different networks) ---------- */
 async function iceServers() {
@@ -65,7 +86,7 @@ function attach(c) {
   conn = c;
   c.on('open', () => {
     setPill(true, 'Connected'); say(''); lastSt = Date.now();
-    if (source) { send({ t: 'src', ...source }); send({ t: 'sync', time: v.currentTime, playing: wantPlay }); }
+    if (source) { send({ t: 'src', ...source }); send({ t: 'sync', time: P.currentTime, playing: wantPlay }); }
   });
   c.on('data', onMsg);
   c.on('close', () => { setPill(false, 'Partner left'); waitPeer = false; conn = null; apply(); });
@@ -74,27 +95,28 @@ function attach(c) {
 
 /* ---------- playback core ---------- */
 function apply() {
-  if (wantPlay) v.preload = 'auto';
+  if (wantPlay && P === v) v.preload = 'auto';
   const go = wantPlay && !waitSelf && !waitPeer;
   const sh = $('#shield');
   sh.classList.toggle('on', wantPlay && (waitSelf || waitPeer));
   sh.textContent = waitPeer ? 'Waiting for your partner to catch up…' : 'Buffering…';
   if (go) {
-    if (hasSrc() && v.paused && !blocked) {
-      v.play().then(() => { blocked = false; }).catch(e => {
+    if (hasSrc() && P.paused && !blocked) {
+      P.play().then(() => { blocked = false; }).catch(e => {
         if (e.name === 'NotAllowedError') { blocked = true; say('Your browser blocked autoplay. Press Play once to start.', true); }
       });
     }
-  } else { if (!v.paused) v.pause(); v.playbackRate = 1; }
+  } else { if (!P.paused) P.pause(); P.playbackRate = 1; }
   $('#btnPlay').textContent = wantPlay ? 'Pause' : 'Play';
 }
-function setPlay(p) { lastLocal = Date.now(); wantPlay = p; send({ t: p ? 'play' : 'pause', time: v.currentTime }); apply(); }
-function seekTo(t) { lastLocal = Date.now(); v.currentTime = t; send({ t: 'seek', time: t }); }
+function setPlay(p) { lastLocal = Date.now(); wantPlay = p; send({ t: p ? 'play' : 'pause', time: P.currentTime }); apply(); }
+function seekTo(t) { lastLocal = Date.now(); P.currentTime = t; send({ t: 'seek', time: t }); }
 function toggle() {
   if (!hasSrc()) return;
   if (blocked) { blocked = false; return apply(); }
   setPlay(!wantPlay);
 }
+function onEnded() { wantPlay = false; apply(); }
 
 function onMsg(m) {
   switch (m.t) {
@@ -110,9 +132,9 @@ function onMsg(m) {
       if (m.host && !isHost && Date.now() - lastLocal > 2500) { // guest follows host if they ever disagree
         if (m.p !== wantPlay) { wantPlay = m.p; apply(); }
         if (!waitSelf && !waitPeer && hasSrc() && m.p === wantPlay) {
-          const d = v.currentTime - m.time;
-          if (Math.abs(d) > (wantPlay ? 0.8 : 2.5)) v.currentTime = m.time;
-          else v.playbackRate = wantPlay && Math.abs(d) > 0.12 ? (d > 0 ? 0.97 : 1.03) : 1;
+          const d = P.currentTime - m.time, hard = P === yt ? 1.5 : 0.8;
+          if (Math.abs(d) > (wantPlay ? hard : 2.5)) P.currentTime = m.time;
+          else P.playbackRate = wantPlay && Math.abs(d) > 0.12 ? (d > 0 ? 0.97 : 1.03) : 1;
         }
       }
       break;
@@ -122,25 +144,33 @@ function onMsg(m) {
 
 /* every 500 ms: decide if we are starving for data, tell the partner how we are doing */
 setInterval(() => {
-  const now = Date.now();
+  const now = Date.now(), isY = P === yt;
   if (hasSrc() && wantPlay) {
-    const a = ahead(), nearEnd = v.duration && v.duration - v.currentTime < 2;
+    const a = ahead(), nearEnd = P.duration && P.duration - P.currentTime < 2;
+    const starving = isY ? (!yt.ready || yt.state === 3) : (v.readyState < 3 || a < 0.3);
     if (!waitSelf) {
-      lowTicks = (v.readyState < 3 || a < 0.3) && !nearEnd && now > forceUntil ? lowTicks + 1 : 0;
+      lowTicks = starving && !nearEnd && now > forceUntil ? lowTicks + 1 : 0;
       if (lowTicks >= 2) { waitSelf = true; waitSince = now; lowTicks = 0; apply(); }
     } else {
-      const ok = a >= 2 || nearEnd || (v.readyState >= 3 && now - waitSince > 5000);
+      const ok = isY ? (yt.ready && now - waitSince > 2000 && (a >= 3 || now - waitSince > 6000))
+                     : (a >= 2 || nearEnd || (v.readyState >= 3 && now - waitSince > 5000));
       if (ok || now - waitSince > 20000) { waitSelf = false; forceUntil = ok ? 0 : now + 8000; apply(); }
     }
   } else if (waitSelf) { waitSelf = false; apply(); }
+  if (isY) { // YouTube can pause/start itself (ads, autoplay rules): keep it matching the shared state
+    updateUI();
+    const go = wantPlay && !waitSelf && !waitPeer;
+    if (yt.ready && now - lastCmd > 2000 && ((go && yt.paused && !blocked) || (!go && !yt.paused))) { lastCmd = now; apply(); }
+  }
   if (conn && conn.open) {
-    send({ t: 'st', w: waitSelf, p: wantPlay, time: v.currentTime, host: isHost });
+    send({ t: 'st', w: waitSelf, p: wantPlay, time: P.currentTime, host: isHost });
     if (waitPeer && now - lastSt > 4000) { waitPeer = false; apply(); }
   }
 }, 500);
 
-v.addEventListener('ended', () => { wantPlay = false; apply(); });
+v.addEventListener('ended', onEnded);
 v.addEventListener('error', () => {
+  if (P !== v) return;
   const c = v.error && v.error.code;
   if (c === 4 && source && source.kind === 'drive') { say('Could not play this file. Checking why…', true); return diagnose(); }
   say(c === 4 ? 'Could not play this file. Check the link is public and the format is MP4 (H.264/AAC).' : 'Playback error (code ' + c + ').', true);
@@ -182,21 +212,55 @@ document.querySelectorAll('#tray button').forEach(b => b.onclick = ev => { ev.st
 document.addEventListener('click', ev => { if (!ev.target.closest('#tray')) $('#tray').hidden = true; });
 
 /* ---------- sources ---------- */
+const YT_ERR = { 2: 'That YouTube link is not valid.', 5: 'YouTube could not play this video here.', 100: 'That YouTube video is private or was removed.', 101: 'The owner of this YouTube video does not allow it to be played on other sites.', 150: 'The owner of this YouTube video does not allow it to be played on other sites.' };
+let ytQueue = null;
+function ensureYT(cb) {
+  if (window.YT && YT.Player) return cb();
+  if (ytQueue) return ytQueue.push(cb);
+  ytQueue = [cb];
+  window.onYouTubeIframeAPIReady = () => { ytQueue.forEach(f => f()); ytQueue = null; };
+  const s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; document.head.appendChild(s);
+}
+function useYT(on) {
+  $('#ytwrap').hidden = !on; v.hidden = on; P = on ? yt : v; yt.has = on;
+  if (on) { v.pause(); v.removeAttribute('src'); v.load(); }
+  else if (yt.ready) yt.p.pauseVideo();
+}
+function loadYT(s) {
+  useYT(true);
+  ensureYT(() => {
+    if (source !== s) return; // a newer source replaced this one
+    if (yt.p) { yt.p.cueVideoById(s.value); yt.ready = true; apply(); return; }
+    yt.p = new YT.Player('ytbox', {
+      width: '100%', height: '100%', videoId: s.value,
+      playerVars: { controls: 0, disablekb: 1, fs: 0, rel: 0, playsinline: 1, modestbranding: 1, iv_load_policy: 3, origin: location.origin },
+      events: {
+        onReady: () => { yt.ready = true; yt.volume = +$('#vol').value; apply(); },
+        onStateChange: e => { if (e.data === 0) onEnded(); },
+        onAutoplayBlocked: () => { blocked = true; say('Your browser blocked autoplay. Press Play once to start.', true); },
+        onError: e => say(YT_ERR[e.data] || 'YouTube error (code ' + e.data + ').', true)
+      }
+    });
+  });
+}
 function loadSource(s, announce) {
   let url;
   if (s.kind === 'drive') {
     if (!KEY) return say('Add your Drive API key to config.js first (see README).', true);
     url = `https://www.googleapis.com/drive/v3/files/${s.value}?alt=media&key=${KEY}`;
   } else if (s.kind === 'url') url = s.value;
-  else return;
+  else if (s.kind !== 'yt') return;
   source = s; wantPlay = false; waitSelf = waitPeer = false; blocked = false; lowTicks = 0;
-  v.preload = 'metadata'; v.src = url; v.load(); $('#empty').hidden = true; apply();
+  $('#empty').hidden = true;
+  if (s.kind === 'yt') loadYT(s);
+  else { useYT(false); v.preload = 'metadata'; v.src = url; v.load(); }
+  apply();
   say(announce ? 'Loaded. Press Play when you are both ready.' : 'Your partner loaded a video.');
   if (announce) send({ t: 'src', ...s });
 }
 function tab(k) {
   document.querySelectorAll('.seg button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
-  $('#srcDrive').hidden = k !== 'drive'; $('#srcUrl').hidden = k !== 'url';
+  $('#srcDrive').hidden = k !== 'drive'; $('#srcUrl').hidden = k !== 'url'; $('#srcYt').hidden = k !== 'yt';
 }
 
 /* ---------- UI wiring ---------- */
@@ -207,19 +271,26 @@ $('#btnCopy').onclick = () => { navigator.clipboard.writeText(location.origin + 
 document.querySelectorAll('.seg button').forEach(b => b.onclick = () => tab(b.dataset.k));
 $('#loadDrive').onclick = () => { const id = driveId($('#driveLink').value.trim()); id ? loadSource({ kind: 'drive', value: id }, true) : say('That does not look like a Drive link.', true); };
 $('#loadUrl').onclick = () => { const u = $('#directLink').value.trim(); /^https?:\/\//.test(u) ? loadSource({ kind: 'url', value: u }, true) : say('Enter a full https:// link.', true); };
+$('#loadYt').onclick = () => { const id = ytId($('#ytLink').value.trim()); id ? loadSource({ kind: 'yt', value: id }, true) : say('That does not look like a YouTube link.', true); };
 $('#btnPlay').onclick = toggle;
 v.onclick = toggle;
-$('#vol').oninput = e => v.volume = e.target.value;
+$('#ytclick').onclick = toggle;
+$('#vol').oninput = e => { v.volume = +e.target.value; yt.volume = +e.target.value; };
 $('#btnFs').onclick = () => document.fullscreenElement ? document.exitFullscreen() : $('#stage').requestFullscreen();
 const seek = $('#seek');
-seek.oninput = () => { dragging = true; $('#time').textContent = fmt(seek.value / 1000 * v.duration) + ' / ' + fmt(v.duration); };
-seek.onchange = () => { dragging = false; if (v.duration) seekTo(seek.value / 1000 * v.duration); };
-v.ontimeupdate = () => { if (dragging || !v.duration) return; seek.value = v.currentTime / v.duration * 1000; $('#time').textContent = fmt(v.currentTime) + ' / ' + fmt(v.duration); };
+function updateUI() {
+  if (dragging || !P.duration) return;
+  seek.value = P.currentTime / P.duration * 1000;
+  $('#time').textContent = fmt(P.currentTime) + ' / ' + fmt(P.duration);
+}
+seek.oninput = () => { dragging = true; $('#time').textContent = fmt(seek.value / 1000 * P.duration) + ' / ' + fmt(P.duration); };
+seek.onchange = () => { dragging = false; if (P.duration) seekTo(seek.value / 1000 * P.duration); };
+v.ontimeupdate = () => { if (P === v) updateUI(); };
 document.onkeydown = e => {
   if (e.target.tagName === 'INPUT') return;
   if (e.code === 'Space') { e.preventDefault(); toggle(); }
-  if (e.code === 'ArrowRight') seekTo(v.currentTime + 5);
-  if (e.code === 'ArrowLeft') seekTo(Math.max(0, v.currentTime - 5));
+  if (e.code === 'ArrowRight') seekTo(P.currentTime + 5);
+  if (e.code === 'ArrowLeft') seekTo(Math.max(0, P.currentTime - 5));
 };
 
 if (location.hash.length === 7) { $('#joinCode').value = location.hash.slice(1); }

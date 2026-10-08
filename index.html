@@ -44,6 +44,7 @@
 
       <div id="stage" class="stage">
         <video id="video" playsinline preload="metadata"></video>
+        <div id="ytwrap" class="ytwrap" hidden><div id="ytbox"></div><div id="ytclick" class="ytclick"></div></div>
         <div id="empty" class="empty">Your video will appear here.</div>
         <div id="shield" class="shield">Waiting for your partner to catch up…</div>
         <div id="floaters" class="floaters" aria-hidden="true"></div>
@@ -67,6 +68,7 @@
         <div class="seg" role="tablist">
           <button data-k="drive" class="on">Google Drive</button>
           <button data-k="url">Direct link</button>
+        <button data-k="yt">YouTube</button>
         </div>
         <div id="srcDrive" class="srcpane">
           <input id="driveLink" placeholder="Paste a Drive share link (Anyone with the link)">
@@ -76,10 +78,16 @@
           <input id="directLink" placeholder="https://…/movie.mp4">
           <button id="loadUrl" class="primary">Load video</button>
         </div>
+        <div id="srcYt" class="srcpane" hidden>
+          <input id="ytLink" placeholder="Paste a YouTube link">
+          <button id="loadYt" class="primary">Load video</button>
+        </div>
       </div>
       <p id="msg" class="msg glass" role="status" hidden></p>
     </section>
   </main>
+
+  <footer class="madeby"><span class="glass">Made with <i class="heart" aria-label="love">❤️</i> by Arpit for Shivangi</span></footer>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
